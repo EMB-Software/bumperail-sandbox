@@ -26,29 +26,26 @@ const checks = [
   } },
   { id: 'unit', async run() {
     // Count from node:test's structured events; a test file's own stdout cannot forge them.
-    let files
-    try { files = sourcesUnder('test').filter(f => f.endsWith('.test.mjs')).map(f => resolve(f)) } catch { files = [] }
-    if (files.length === 0) return { code: 1, reason: 'no test files found' }
+    // No `files`: Node's own discovery, the same set `node --test` runs. A file Node reports as a test itself had no tests in it.
     const c = { tests: 0, failed: 0, skipped: 0, todo: 0 }
-    const perFile = new Map(files.map(f => [f, 0]))
+    const empty = []
     try {
-      for await (const e of run({ files, concurrency: false })) {
+      for await (const e of run({ concurrency: false, timeout: 60_000 })) {
         if (e.type !== 'test:pass' && e.type !== 'test:fail') continue
         const d = e.data
         if (d.details?.type === 'suite') { if (e.type === 'test:fail') c.failed++; continue }
-        if (d.name === d.file) { // the entry Node makes for a file itself: no tests inside it, or it failed to load
+        if (d.file && resolve(d.name) === d.file) { // Node's entry for a file itself (named by its path): no tests inside it, or it failed to load
           if (e.type === 'test:fail') c.failed++
+          else empty.push(d.file)
           continue
         }
         c.tests++
-        perFile.set(d.file, (perFile.get(d.file) ?? 0) + 1)
         if (e.type === 'test:fail') c.failed++
         if (d.skip !== undefined && d.skip !== false) c.skipped++
         if (d.todo !== undefined && d.todo !== false) c.todo++
       }
     } catch (error) { return { code: 1, reason: `test stream error: ${error?.message ?? error}` } }
     let reason = null
-    const empty = [...perFile].filter(([, n]) => n === 0).map(([f]) => f)
     if (c.tests === 0) reason = 'zero tests ran'
     else if (empty.length > 0) reason = `no tests in ${empty.map(f => f.split('/').pop()).join(', ')}`
     else if (c.failed > 0) reason = `${c.failed} failed of ${c.tests}`
