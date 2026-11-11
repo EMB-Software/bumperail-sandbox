@@ -1,7 +1,8 @@
 // Runs the repository's real checks and prints them in the format `bumperail check` parses.
 import { spawnSync } from 'node:child_process'
 import { readdirSync } from 'node:fs'
-import { join } from 'node:path'
+import { join, resolve } from 'node:path'
+import { run } from 'node:test'
 
 function sourcesUnder(dir) {
   let entries
@@ -9,7 +10,7 @@ function sourcesUnder(dir) {
   return entries.flatMap(e => e.isDirectory() ? sourcesUnder(join(dir, e.name)) : /\.(mjs|cjs|js)$/.test(e.name) ? [join(dir, e.name)] : [])
 }
 
-const run = (args) => {
+const exec = (args) => {
   const r = spawnSync(process.execPath, args, { encoding: 'utf8' })
   process.stdout.write(r.stdout ?? '')
   process.stderr.write(r.stderr ?? '')
@@ -20,19 +21,39 @@ const sources = ['src', 'test', 'scripts'].flatMap(sourcesUnder)
 const checks = [
   { id: 'syntax', run() {
     let code = 0
-    for (const file of sources) { const r = run(['--check', file]); if (r.code !== 0) code = r.code }
+    for (const file of sources) { const r = exec(['--check', file]); if (r.code !== 0) code = r.code }
     return { code, reason: sources.length === 0 ? 'no source files found' : null }
   } },
-  { id: 'unit', run() {
-    const r = run(['--test'])
-    const n = name => Number(new RegExp(`^ℹ ${name} (\\d+)$`, 'm').exec(r.out)?.[1] ?? NaN)
-    const [tests, pass, skipped, todo] = [n('tests'), n('pass'), n('skipped'), n('todo')]
+  { id: 'unit', async run() {
+    // Count from node:test's structured events; a test file's own stdout cannot forge them.
+    let files
+    try { files = sourcesUnder('test').filter(f => f.endsWith('.test.mjs')).map(f => resolve(f)) } catch { files = [] }
+    if (files.length === 0) return { code: 1, reason: 'no test files found' }
+    const c = { tests: 0, failed: 0, skipped: 0, todo: 0 }
+    const perFile = new Map(files.map(f => [f, 0]))
+    try {
+      for await (const e of run({ files, concurrency: false })) {
+        if (e.type !== 'test:pass' && e.type !== 'test:fail') continue
+        const d = e.data
+        if (d.details?.type === 'suite') { if (e.type === 'test:fail') c.failed++; continue }
+        if (d.name === d.file) { // the entry Node makes for a file itself: no tests inside it, or it failed to load
+          if (e.type === 'test:fail') c.failed++
+          continue
+        }
+        c.tests++
+        perFile.set(d.file, (perFile.get(d.file) ?? 0) + 1)
+        if (e.type === 'test:fail') c.failed++
+        if (d.skip !== undefined && d.skip !== false) c.skipped++
+        if (d.todo !== undefined && d.todo !== false) c.todo++
+      }
+    } catch (error) { return { code: 1, reason: `test stream error: ${error?.message ?? error}` } }
     let reason = null
-    if (![tests, pass, skipped, todo].every(Number.isFinite)) reason = 'no test summary'
-    else if (tests === 0) reason = 'zero tests ran'
-    else if (pass !== tests) reason = `${pass} of ${tests} tests passed`
-    else if (skipped > 0 || todo > 0) reason = `${skipped} skipped, ${todo} todo`
-    return { code: r.code, reason }
+    const empty = [...perFile].filter(([, n]) => n === 0).map(([f]) => f)
+    if (c.tests === 0) reason = 'zero tests ran'
+    else if (empty.length > 0) reason = `no tests in ${empty.map(f => f.split('/').pop()).join(', ')}`
+    else if (c.failed > 0) reason = `${c.failed} failed of ${c.tests}`
+    else if (c.skipped > 0 || c.todo > 0) reason = `${c.skipped} skipped, ${c.todo} todo`
+    return { code: reason ? 1 : 0, reason }
   } }
 ]
 
@@ -41,7 +62,7 @@ console.log(JSON.stringify({ base: 'origin/main', groups: checks.map(c => c.id),
 let failed = false
 for (const check of checks) {
   const started = Date.now()
-  const { code, reason } = check.run()
+  const { code, reason } = await check.run()
   const exit = code === 0 && reason ? 1 : code
   console.log(`${check.id}: ${Date.now() - started}ms, exit ${exit}${reason ? `; ${reason}` : ''}`)
   if (exit !== 0) failed = true
