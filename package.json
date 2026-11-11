@@ -1,0 +1,10 @@
+{
+  "name": "bumperail-sandbox",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node --test",
+    "check:dev": "node scripts/check-dev.mjs"
+  }
+}
